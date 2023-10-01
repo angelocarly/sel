@@ -3,6 +3,9 @@ use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::device::{Device, DeviceCreateInfo, QueueCreateInfo, QueueFlags};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
+use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
+use vulkano::sync::{self, GpuFuture};
 
 use tracing::info;
 use tracing_subscriber;
@@ -69,4 +72,64 @@ fn main() {
     let a = *buffer.read().unwrap();
     info!("Buffer data: {:?}", a);
 
+    // Buffer test
+    let source_content: Vec<i32> = (0..64).collect();
+    let source = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload,
+            ..Default::default()
+        },
+        source_content
+    ).expect("Failed to create source buffer.");
+
+    let destination_content: Vec<i32> = (0..64).map(|_| 0).collect();
+    let destination = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Download,
+            ..Default::default()
+        },
+        destination_content
+    ).expect("Failed to create destination buffer.");
+
+    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        device.clone(),
+        StandardCommandBufferAllocatorCreateInfo::default(),
+    );
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        &command_buffer_allocator,
+        queue_family_index,
+        CommandBufferUsage::OneTimeSubmit,
+    ).unwrap();
+
+    builder.copy_buffer(CopyBufferInfo::buffers(source.clone(), destination.clone()))
+        .unwrap();
+
+    let command_buffer = builder.build().unwrap();
+
+    let future = sync::now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+
+    future.wait(None).unwrap();
+
+    let src_content = source.read().unwrap();
+    let dst_content = destination.read().unwrap();
+    assert_eq!(&*src_content, &*dst_content);
+
+    info!("Src: {:?}", &src_content[..]);
+    info!("Dst: {:?}", &dst_content[..]);
 }
+
