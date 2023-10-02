@@ -1,5 +1,5 @@
 use vulkano::VulkanLibrary;
-use vulkano::instance::{Instance, InstanceCreateInfo};
+use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions};
 use vulkano::device::{Device, DeviceCreateInfo, QueueCreateInfo, QueueFlags};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
@@ -10,15 +10,49 @@ use vulkano::sync::{self, GpuFuture};
 use tracing::info;
 use tracing_subscriber;
 
+use std::env;
+use std::sync::Arc;
+
+fn create_instance() -> Arc<Instance> {
+    let library = VulkanLibrary::new().expect("No local Vulkan library found.");
+
+    return if env::consts::OS == "macos" {
+        // Enable the portability extension on macOS in order to support MoltenVK.
+        let extensions = InstanceExtensions {
+            khr_portability_enumeration: true,
+            ..InstanceExtensions::empty()
+        };
+        Instance::new(
+            library,
+            InstanceCreateInfo {
+                enabled_extensions: extensions,
+                enumerate_portability: true,
+                ..Default::default()
+            }
+        ).expect("Failed to create a macos Vulkan instance.")
+    } else {
+        let extensions = InstanceExtensions {
+            khr_portability_enumeration: false,
+            ..InstanceExtensions::empty()
+        };
+        Instance::new(
+            library,
+            InstanceCreateInfo {
+                enabled_extensions: extensions,
+                enumerate_portability: false,
+                ..Default::default()
+            }
+        ).expect("Failed to create Vulkan instance.")
+    }
+}
+
 fn main() {
 
     // Logging setup
     tracing_subscriber::fmt::init();
 
     // Vulkan setup
-    let library = VulkanLibrary::new().expect("No local Vulkan library found.");
-    let instance = Instance::new(library, InstanceCreateInfo::default())
-        .expect("Failed to create Vulkan instance.");
+    let instance = create_instance();
 
     let physical_device = instance
         .enumerate_physical_devices()
