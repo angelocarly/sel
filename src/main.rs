@@ -19,6 +19,7 @@ use vulkano::swapchain::{Swapchain, SwapchainCreateInfo};
 
 use vulkano_win::VkSurfaceBuild;
 use winit::window::CursorIcon::Default;
+use crate::graphics::get_framebuffers;
 
 
 fn test() {
@@ -54,30 +55,15 @@ fn main() {
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
     // Swapchain
-    let caps = physical_device
-        .surface_capabilities(&surface, Default::default())
-        .expect("Failed to get surface capabilities.");
-    let dimensions = window.inner_size();
-    let composite_alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
-    let image_format = Some(
-        physical_device
-            .surface_formats(&surface, Default::default())
-            .unwrap()[0]
-            .0,
+    let (swapchain, images) = graphics::create_swapchain(
+        physical_device.clone(),
+        device.clone(),
+        window.clone(),
+        surface.clone(),
     );
 
-    let (mut swapchain, images) = Swapchain::new(
-        device.clone(),
-        surface.clone(),
-        SwapchainCreateInfo {
-            min_image_count: caps.min_image_count + 1,
-            image_format,
-            image_extent: dimensions.into(),
-            image_usage: ImageUsage::COLOR_ATTACHMENT,
-            composite_alpha,
-            ..Default::default()
-        },
-    ).unwrap();
+    let render_pass = graphics::get_render_pass(device.clone(), &swapchain);
+    let framebuffers = get_framebuffers(&images, &render_pass);
 
     // Command buffer
     use std::default::Default;
@@ -91,6 +77,19 @@ fn main() {
         queue_family_index,
         CommandBufferUsage::OneTimeSubmit,
     ).unwrap();
+
+    // vertex stuffs
+    let vertex1 = graphics::MyVertex {
+        position: [-0.5, -0.5],
+    };
+    let vertex2 = graphics::MyVertex {
+        position: [0.0, 0.5],
+    };
+    let vertex3 = graphics::MyVertex {
+        position: [0.5, -0.25],
+    };
+    // let vertex_buffer = Buffer::from_iter()
+    // TODO
 
     // Record the commands
     let buf = graphics::draw(

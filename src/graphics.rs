@@ -1,32 +1,76 @@
-use vulkano::VulkanLibrary;
-use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions};
-use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags, DeviceExtensions};
-use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
+use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, PrimaryAutoCommandBuffer};
-use vulkano::sync::{self, GpuFuture};
-use vulkano_shaders::shader;
-use vulkano::pipeline::{ComputePipeline, PipelineBindPoint};
-use vulkano::pipeline::Pipeline;
+use vulkano::command_buffer::ClearColorImageInfo;
+use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags, DeviceExtensions};
+use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::image::{ImageDimensions, StorageImage};
 use vulkano::format::Format;
-use vulkano::command_buffer::ClearColorImageInfo;
 use vulkano::format::ClearColorValue;
+use vulkano::image::{ImageDimensions, ImageUsage, StorageImage, SwapchainImage};
 use vulkano::image::view::ImageView;
+use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions};
+use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
+use vulkano::pipeline::{ComputePipeline, PipelineBindPoint};
+use vulkano::pipeline::Pipeline;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
+use vulkano::swapchain::{Swapchain, SwapchainCreateInfo};
+use vulkano::swapchain::Surface;
+use vulkano::shader::spirv::Instruction::All;
+use vulkano::sync::{self, GpuFuture};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
+use vulkano::VulkanLibrary;
+
+use vulkano_shaders::shader;
 
 use vulkano_win::required_extensions;
 use vulkano_win::VkSurfaceBuild;
 
+use winit::window::Window;
+
 use std::env;
+use std::mem::swap;
 use std::sync::Arc;
-use vulkano::shader::spirv::Instruction::All;
 
 use tracing::info;
-use vulkano::swapchain::Surface;
+
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+pub struct MyVertex {
+    #[format(R32G32_SFLOAT)]
+    pub(crate) position: [f32; 2],
+}
+
+pub mod vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        src: "
+            #version 460
+
+            layout(location = 0) in vec2 position;
+
+            void main() {
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        "
+    }
+}
+
+pub mod fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        src: "
+            #version 460
+
+            layout(location = 0) out vec4 f_color;
+
+            void main() {
+                f_color = vec4(1.0, 0.0, 0.0, 1.0);
+            }
+        ",
+    }
+}
 
 pub(crate) fn create_instance() -> Arc<Instance> {
     let library = VulkanLibrary::new().expect("No local Vulkan library found.");
@@ -109,6 +153,72 @@ pub fn create_device(physical_device: Arc<PhysicalDevice>, queue_family_index: u
     return (device, queues);
 }
 
+pub fn create_swapchain(physical_device: Arc<PhysicalDevice>, device: Arc<Device>, window: Arc<Window>, surface: Arc<Surface>) -> (Arc<Swapchain>, Vec<Arc<SwapchainImage>>) {
+    let caps = physical_device
+        .surface_capabilities(&surface, Default::default())
+        .expect("Failed to get surface capabilities.");
+    let dimensions = window.inner_size();
+    let composite_alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
+    let image_format = Some(
+        physical_device
+            .surface_formats(&surface, Default::default())
+            .unwrap()[0]
+            .0,
+    );
+
+    let (mut swapchain, images) = Swapchain::new(
+        device.clone(),
+        surface.clone(),
+        SwapchainCreateInfo {
+            min_image_count: caps.min_image_count + 1,
+            image_format,
+            image_extent: dimensions.into(),
+            image_usage: ImageUsage::COLOR_ATTACHMENT,
+            composite_alpha,
+            ..Default::default()
+        },
+    ).unwrap();
+
+    return (swapchain, images);
+}
+
+pub fn get_render_pass(device: Arc<Device>, swapchain: &Arc<Swapchain>) -> Arc<RenderPass> {
+    vulkano::single_pass_renderpass!(
+        device,
+        attachments: {
+            color: {
+                load: Clear,
+                store: Store,
+                format: swapchain.image_format(),
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: {},
+        },
+    ).unwrap()
+}
+
+pub fn get_framebuffers(
+    images: &[Arc<SwapchainImage>],
+    render_pass: &Arc<RenderPass>,
+) -> Vec<Arc<Framebuffer>> {
+    images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone()).unwrap();
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )
+                .unwrap()
+        })
+        .collect::<Vec<_>>()
+}
 mod cs {
     vulkano_shaders::shader!{
         ty: "compute",
