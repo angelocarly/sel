@@ -1,6 +1,6 @@
 use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, PrimaryAutoCommandBuffer};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::command_buffer::ClearColorImageInfo;
 use vulkano::device::{Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags, DeviceExtensions};
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
@@ -12,14 +12,14 @@ use vulkano::image::{ImageDimensions, ImageUsage, StorageImage, SwapchainImage};
 use vulkano::image::view::ImageView;
 use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
-use vulkano::pipeline::{ComputePipeline, PipelineBindPoint};
+use vulkano::pipeline::{ComputePipeline, GraphicsPipeline, PipelineBindPoint};
 use vulkano::pipeline::Pipeline;
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::swapchain::{Swapchain, SwapchainCreateInfo};
 use vulkano::swapchain::Surface;
 use vulkano::shader::spirv::Instruction::All;
 use vulkano::sync::{self, GpuFuture};
-use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::VulkanLibrary;
 
 use vulkano_shaders::shader;
@@ -34,6 +34,9 @@ use std::mem::swap;
 use std::sync::Arc;
 
 use tracing::info;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
+use vulkano::shader::ShaderModule;
 
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
@@ -254,6 +257,24 @@ mod cs {
     }
 }
 
+pub fn get_pipeline(
+    device: Arc<Device>,
+    vs: Arc<ShaderModule>,
+    fs: Arc<ShaderModule>,
+    render_pass: Arc<RenderPass>,
+    viewport: Viewport,
+) -> Arc<GraphicsPipeline> {
+    GraphicsPipeline::start()
+        .vertex_input_state(MyVertex::per_vertex())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .render_pass(Subpass::from(render_pass, 0).unwrap())
+        .build(device)
+        .unwrap()
+}
+
 pub fn draw(device: Arc<Device>, memory_allocator: StandardMemoryAllocator, queue: Arc<Queue>, mut builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>) -> Subbuffer<[u8]>
 {
     // Compute shader
@@ -325,4 +346,42 @@ pub fn draw(device: Arc<Device>, memory_allocator: StandardMemoryAllocator, queu
         .unwrap();
 
     return buf;
+}
+
+pub fn get_command_buffers(
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    queue: &Arc<Queue>,
+    pipeline: &Arc<GraphicsPipeline>,
+    framebuffers: &Vec<Arc<Framebuffer>>,
+    vertex_buffer: &Subbuffer<[MyVertex]>,
+) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
+    framebuffers
+        .iter()
+        .map(|framebuffer| {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                command_buffer_allocator,
+                queue.queue_family_index(),
+                CommandBufferUsage::MultipleSubmit, // don't forget to write the correct buffer usage
+            )
+                .unwrap();
+
+            builder
+                .begin_render_pass(
+                    RenderPassBeginInfo {
+                        clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
+                        ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                    },
+                    SubpassContents::Inline,
+                )
+                .unwrap()
+                .bind_pipeline_graphics(pipeline.clone())
+                .bind_vertex_buffers(0, vertex_buffer.clone())
+                .draw(vertex_buffer.len() as u32, 1, 0, 0)
+                .unwrap()
+                .end_render_pass()
+                .unwrap();
+
+            Arc::new(builder.build().unwrap())
+        })
+        .collect()
 }
