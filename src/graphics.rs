@@ -348,7 +348,7 @@ pub fn draw(device: Arc<Device>, memory_allocator: StandardMemoryAllocator, queu
     return buf;
 }
 
-pub fn get_command_buffers(
+pub fn build_command_buffers(
     command_buffer_allocator: &StandardCommandBufferAllocator,
     queue: &Arc<Queue>,
     pipeline: &Arc<GraphicsPipeline>,

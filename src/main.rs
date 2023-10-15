@@ -3,9 +3,11 @@ pub mod graphics;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo};
-use vulkano::sync::{self, GpuFuture};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo};
+use vulkano::sync::{self, FlushError, GpuFuture};
 use vulkano::pipeline::Pipeline;
+use vulkano::swapchain;
+
 use tracing_subscriber;
 
 use winit::event::{Event, WindowEvent};
@@ -17,20 +19,17 @@ use winit::event_loop::ControlFlow;
 use image::{ImageBuffer, Rgba};
 use vulkano::image::ImageUsage;
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::swapchain::{Swapchain, SwapchainCreateInfo, SwapchainCreationError};
+use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
 
 use vulkano_win::VkSurfaceBuild;
 use winit::window::CursorIcon::Default;
 use crate::graphics::{fs, get_framebuffers, vs};
-
 
 fn test() {
     let mut v: Vec<i32> = vec![1, 2, 3];
     let num: &i32 = &v[1];
     v.push(4);
 }
-
-
 
 fn main() {
 
@@ -66,23 +65,11 @@ fn main() {
         surface.clone(),
     );
 
+    // Render pass
     let render_pass = graphics::get_render_pass(device.clone(), &swapchain);
     let framebuffers = get_framebuffers(&images, &render_pass);
 
-    // Command buffer
-    use std::default::Default;
-    let command_buffer_allocator = StandardCommandBufferAllocator::new(
-        device.clone(),
-        StandardCommandBufferAllocatorCreateInfo::default(),
-    );
-
-    let mut builder = AutoCommandBufferBuilder::primary(
-        &command_buffer_allocator,
-        queue_family_index,
-        CommandBufferUsage::OneTimeSubmit,
-    ).unwrap();
-
-    // vertex stuffs
+    // Model
     let vertex1 = graphics::MyVertex {
         position: [-0.5, -0.5],
     };
@@ -105,6 +92,7 @@ fn main() {
         vec![vertex1, vertex2, vertex3]
     ).unwrap();
 
+    // Pipeline
     let vs = vs::load(device.clone()).expect("failed to create shader module.");
     let fs = fs::load(device.clone()).expect("failed to create shader module.");
 
@@ -122,7 +110,14 @@ fn main() {
         viewport.clone()
     );
 
-    let mut command_buffers = graphics::get_command_buffers(
+    // Command buffers
+    use std::default::Default;
+    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        device.clone(),
+        StandardCommandBufferAllocatorCreateInfo::default(),
+    );
+
+    let mut command_buffers = graphics::build_command_buffers(
         &command_buffer_allocator,
         &queue,
         &pipeline,
@@ -130,22 +125,11 @@ fn main() {
         &vertex_buffer,
     );
 
-    // Record the commands
-    let buf = graphics::draw(
-        device.clone(),
-        memory_allocator,
-        queue.clone(),
-        &mut builder
-    );
-
-    // Execute
-    let command_buffer = builder.build().unwrap();
-
     // Event loop
     let mut window_resized = false;
     let mut recreate_swapchain = false;
 
-    event_loop.run(|event, _, control_flow| {
+    event_loop.run(move |event, _, control_flow| {
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -160,7 +144,7 @@ fn main() {
                 window_resized = true;
             },
             Event::MainEventsCleared => {
-                if recreate_swapchain {
+                if window_resized || recreate_swapchain {
                     recreate_swapchain = false;
 
                     let new_dimensions = window.inner_size();
@@ -177,24 +161,67 @@ fn main() {
                     };
                     swapchain = new_swapchain;
                     let new_framebuffers = get_framebuffers(&new_images, &render_pass);
+
+                    if window_resized {
+                        window_resized = false;
+
+                        viewport.dimensions = new_dimensions.into();
+                        let new_pipeline = graphics::get_pipeline(
+                            device.clone(),
+                            vs.clone(),
+                            fs.clone(),
+                            render_pass.clone(),
+                            viewport.clone(),
+                        );
+                        command_buffers = graphics::build_command_buffers(
+                            &command_buffer_allocator,
+                            &queue,
+                            &new_pipeline,
+                            &new_framebuffers,
+                            &vertex_buffer,
+                        );
+                    }
+
+                    let (image_i, suboptimal, acquire_future) =
+                        match swapchain::acquire_next_image(swapchain.clone(), None) {
+                            Ok(r) => r,
+                            Err(AcquireError::OutOfDate) => {
+                                recreate_swapchain = true;
+                                return;
+                            }
+                            Err(e) => panic!("failed to acquire next image: {e}"),
+                        };
+
+                    if suboptimal {
+                        recreate_swapchain = true;
+                    }
+
+                    let execution = sync::now(device.clone())
+                        .join(acquire_future)
+                        .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
+                        .unwrap()
+                        .then_swapchain_present(
+                            queue.clone(),
+                            SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_i),
+                        )
+                        .then_signal_fence_and_flush();
+
+                    match execution {
+                        Ok(future) => {
+                            future.wait(None).unwrap();  // wait for the GPU to finish
+                        }
+                        Err(FlushError::OutOfDate) => {
+                            recreate_swapchain = true;
+                        }
+                        Err(e) => {
+                            println!("Failed to flush future: {e}");
+                        }
+                    }
                 }
             },
             _ => {}
         }
     });
-
-    let future = sync::now(device.clone())
-        .then_execute(queue.clone(), command_buffer)
-        .unwrap()
-        .then_signal_fence_and_flush()
-        .unwrap();
-
-    future.wait(None).unwrap();
-
-    // Write output image
-    let buffer_content = buf.read().unwrap();
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
-    image.save("image.png").unwrap();
 
 }
 
