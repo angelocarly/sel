@@ -65,10 +65,10 @@ fn main() {
         position: [-0.5, -0.5],
     };
     let vertex2 = graphics::MyVertex {
-        position: [0.0, 0.5],
+        position: [0.5, -0.5],
     };
     let vertex3 = graphics::MyVertex {
-        position: [0.5, -0.25],
+        position: [0.0, 0.5],
     };
     let vertex_buffer = Buffer::from_iter(
         &memory_allocator,
@@ -80,7 +80,7 @@ fn main() {
             usage: MemoryUsage::Upload,
             ..Default::default()
         },
-        vec![vertex1, vertex2, vertex3]
+        vec![vertex1, vertex2, vertex3],
     ).unwrap();
 
     // Pipeline
@@ -98,7 +98,7 @@ fn main() {
         vs.clone(),
         fs.clone(),
         render_pass.clone(),
-        viewport.clone()
+        viewport.clone(),
     );
 
     // Command buffers
@@ -121,18 +121,12 @@ fn main() {
 
     event_loop.run(move |event, _, control_flow| {
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 *control_flow = ControlFlow::Exit;
-            },
-            Event::WindowEvent {
-                event: WindowEvent::Resized(_),
-                ..
-            } => {
+            }
+            Event::WindowEvent { event: WindowEvent::Resized(_), .. } => {
                 window_resized = true;
-            },
+            }
             Event::MainEventsCleared => {
                 if window_resized || recreate_swapchain {
                     recreate_swapchain = false;
@@ -208,10 +202,9 @@ fn main() {
                         }
                     }
                 }
-            },
+            }
             _ => {}
         }
     });
-
 }
 
