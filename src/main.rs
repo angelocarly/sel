@@ -3,9 +3,7 @@ pub mod graphics;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, CopyImageToBufferInfo, RenderPassBeginInfo};
 use vulkano::sync::{self, FlushError, GpuFuture};
-use vulkano::pipeline::Pipeline;
 use vulkano::swapchain;
 
 use tracing_subscriber;
@@ -16,30 +14,21 @@ use winit::window::WindowBuilder;
 use winit::window::Window;
 use winit::event_loop::ControlFlow;
 
-use image::{ImageBuffer, Rgba};
-use vulkano::image::ImageUsage;
 use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
+use vulkano::swapchain::{AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
 
 use vulkano_win::VkSurfaceBuild;
-use winit::window::CursorIcon::Default;
 use crate::graphics::{fs, get_framebuffers, vs};
 
-fn test() {
-    let mut v: Vec<i32> = vec![1, 2, 3];
-    let num: &i32 = &v[1];
-    v.push(4);
-}
-
 fn main() {
-
-    test();
 
     // Logging setup
     tracing_subscriber::fmt::init();
 
+    // Vulkan setup
     let instance = graphics::create_instance();
 
+    // Window - creates vk surface
     let event_loop = EventLoop::new();
     let surface = WindowBuilder::new()
         .build_vk_surface(&event_loop, instance.clone())
@@ -51,7 +40,9 @@ fn main() {
         .downcast::<Window>()
         .unwrap();
 
-    // Vulkan setup
+    window.set_title("Sel");
+
+    // Vulkan devices - takes window surface
     let (physical_device, queue_family_index) = graphics::create_physical_device(instance.clone(), surface.clone());
     let (device, mut queues) = graphics::create_device(physical_device.clone(), queue_family_index);
     let queue = queues.next().unwrap();
@@ -111,7 +102,6 @@ fn main() {
     );
 
     // Command buffers
-    use std::default::Default;
     let command_buffer_allocator = StandardCommandBufferAllocator::new(
         device.clone(),
         StandardCommandBufferAllocatorCreateInfo::default(),
@@ -157,7 +147,7 @@ fn main() {
                         // This error tends to happen when the user is manually resizing the window.
                         // Simply restarting the loop is the easiest way to fix this issue.
                         Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                        Err(e) => panic!("failed to recreate swapchain: {e}"),
+                        Err(e) => panic!("failed to recreate swapchain: {}", e),
                     };
                     swapchain = new_swapchain;
                     let new_framebuffers = get_framebuffers(&new_images, &render_pass);
@@ -189,7 +179,7 @@ fn main() {
                                 recreate_swapchain = true;
                                 return;
                             }
-                            Err(e) => panic!("failed to acquire next image: {e}"),
+                            Err(e) => panic!("failed to acquire next image: {}", e),
                         };
 
                     if suboptimal {
