@@ -1,6 +1,6 @@
-pub mod graphics;
+pub mod vulkan;
+mod graphics;
 
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
 use vulkano::sync::{self, FlushError, GpuFuture};
@@ -18,7 +18,8 @@ use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::swapchain::{AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
 
 use vulkano_win::VkSurfaceBuild;
-use crate::graphics::{fs, get_framebuffers, vs};
+use crate::graphics::{fs, vs};
+use crate::vulkan::get_framebuffers;
 
 fn main() {
 
@@ -26,7 +27,7 @@ fn main() {
     tracing_subscriber::fmt::init();
 
     // Vulkan setup
-    let instance = graphics::create_instance();
+    let instance = vulkan::create_instance();
 
     // Window - creates vk surface
     let event_loop = EventLoop::new();
@@ -43,13 +44,13 @@ fn main() {
     window.set_title("Sel");
 
     // Vulkan devices - takes window surface
-    let (physical_device, queue_family_index) = graphics::create_physical_device(instance.clone(), surface.clone());
-    let (device, mut queues) = graphics::create_device(physical_device.clone(), queue_family_index);
+    let (physical_device, queue_family_index) = vulkan::create_physical_device(instance.clone(), surface.clone());
+    let (device, mut queues) = vulkan::create_device(physical_device.clone(), queue_family_index);
     let queue = queues.next().unwrap();
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
     // Swapchain
-    let (mut swapchain, images) = graphics::create_swapchain(
+    let (mut swapchain, images) = vulkan::create_swapchain(
         physical_device.clone(),
         device.clone(),
         window.clone(),
@@ -57,35 +58,8 @@ fn main() {
     );
 
     // Render pass
-    let render_pass = graphics::get_render_pass(device.clone(), &swapchain);
+    let render_pass = vulkan::get_render_pass(device.clone(), &swapchain);
     let framebuffers = get_framebuffers(&images, &render_pass);
-
-    // Model
-    let vertex1 = graphics::MyVertex {
-        position: [-0.5, -0.5],
-    };
-    let vertex2 = graphics::MyVertex {
-        position: [0.5, -0.5],
-    };
-    let vertex3 = graphics::MyVertex {
-        position: [0.0, 0.5],
-    };
-    let vertex_buffer = Buffer::from_iter(
-        &memory_allocator,
-        BufferCreateInfo {
-            usage: BufferUsage::VERTEX_BUFFER,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            usage: MemoryUsage::Upload,
-            ..Default::default()
-        },
-        vec![vertex1, vertex2, vertex3],
-    ).unwrap();
-
-    // Pipeline
-    let vs = vs::load(device.clone()).expect("failed to create shader module.");
-    let fs = fs::load(device.clone()).expect("failed to create shader module.");
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -93,12 +67,29 @@ fn main() {
         depth_range: 0.0..1.0,
     };
 
-    let pipeline = graphics::get_pipeline(
+    // Image
+    let (image, image_view) = graphics::get_image(
+        &memory_allocator,
+        queue.clone(),
+    );
+
+    // Compute pipeline
+    let (compute_pipeline, compute_descriptor_set) = graphics::get_pipeline(
+        device.clone(),
+        image_view.clone()
+    );
+
+    // Graphics pipeline
+    let vs = vs::load(device.clone()).expect("failed to create shader module.");
+    let fs = fs::load(device.clone()).expect("failed to create shader module.");
+
+    let (graphics_pipeline, graphics_descriptor_set) = graphics::get_graphics_pipeline(
         device.clone(),
         vs.clone(),
         fs.clone(),
         render_pass.clone(),
         viewport.clone(),
+        image_view.clone()
     );
 
     // Command buffers
@@ -110,9 +101,11 @@ fn main() {
     let mut command_buffers = graphics::build_command_buffers(
         &command_buffer_allocator,
         &queue,
-        &pipeline,
+        &compute_pipeline,
+        compute_descriptor_set.clone(),
+        &graphics_pipeline,
+        graphics_descriptor_set.clone(),
         &framebuffers,
-        &vertex_buffer,
     );
 
     // Event loop
@@ -150,19 +143,26 @@ fn main() {
                         window_resized = false;
 
                         viewport.dimensions = new_dimensions.into();
-                        let new_pipeline = graphics::get_pipeline(
+                        let (new_compute_pipeline , new_compute_descriptor_set) = graphics::get_pipeline(
+                            device.clone(),
+                            image_view.clone(),
+                        );
+                        let (new_graphics_pipeline, new_graphics_descriptor_set) = graphics::get_graphics_pipeline(
                             device.clone(),
                             vs.clone(),
                             fs.clone(),
                             render_pass.clone(),
                             viewport.clone(),
+                            image_view.clone(),
                         );
                         command_buffers = graphics::build_command_buffers(
                             &command_buffer_allocator,
                             &queue,
-                            &new_pipeline,
+                            &new_compute_pipeline,
+                            new_compute_descriptor_set.clone(),
+                            &new_graphics_pipeline,
+                            new_graphics_descriptor_set.clone(),
                             &new_framebuffers,
-                            &vertex_buffer,
                         );
                     }
 
