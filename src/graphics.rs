@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::{CommandBufferBuilderAlloc, StandardCommandBufferAllocator};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, PersistentDescriptorSet, WriteDescriptorSet};
 
 use vulkano::device::{Device, Queue};
-use vulkano::format::Format;
-use vulkano::image::{ImageDimensions, StorageImage};
+use vulkano::format::{ClearColorValue, Format};
+use vulkano::image::{ImageAccess, ImageCreateFlags, ImageDimensions, ImageLayout, ImageUsage, StorageImage};
+use vulkano::image::traits::ImageAccessFromUndefinedLayout;
 use vulkano::image::view::ImageView;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryUsage, StandardMemoryAllocator};
 use vulkano::pipeline::{ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout};
@@ -15,7 +16,9 @@ use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::Vertex;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
+use vulkano::render_pass::LoadOp::Clear;
 use vulkano::shader::ShaderModule;
+use vulkano::shader::spirv::StorageClass::Image;
 
 /**
  * For now: Contains logic for rendering an image with a compute shader
@@ -23,7 +26,7 @@ use vulkano::shader::ShaderModule;
 
 // ================================== Image ========================================================
 pub fn get_image(memory_allocator: &StandardMemoryAllocator, queue: Arc<Queue>) -> (Arc<StorageImage>, Arc<ImageView<StorageImage>>) {
-    let image = StorageImage::new(
+    let mut image = StorageImage::with_usage(
         memory_allocator,
         ImageDimensions::Dim2d {
             width: 1024,
@@ -31,6 +34,11 @@ pub fn get_image(memory_allocator: &StandardMemoryAllocator, queue: Arc<Queue>) 
             array_layers: 1,
         },
         Format::R8G8B8A8_UNORM,
+        ImageUsage::TRANSFER_SRC
+            | ImageUsage::TRANSFER_DST
+            | ImageUsage::SAMPLED
+            | ImageUsage::STORAGE,
+        ImageCreateFlags::empty(),
         Some(queue.queue_family_index()),
     ).unwrap();
 
@@ -182,6 +190,7 @@ pub fn build_command_buffers(
     graphics_pipeline: &Arc<GraphicsPipeline>,
     graphics_descriptor_set: Arc<PersistentDescriptorSet>,
     framebuffers: &Vec<Arc<Framebuffer>>,
+    image: &Arc<StorageImage>
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
@@ -194,37 +203,43 @@ pub fn build_command_buffers(
                 .unwrap();
 
             builder
-                // Dispatch the compute shader
-                .bind_pipeline_compute(compute_pipeline.clone())
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Compute,
-                    compute_pipeline.layout().clone(),
-                    0,
-                    compute_descriptor_set.clone()
-                )
-                .dispatch([1024 / 8, 1024 / 8, 1])
-                .unwrap()
-
-                // Render the compute result
-                .bind_pipeline_graphics(graphics_pipeline.clone())
-                .bind_descriptor_sets(
-                    PipelineBindPoint::Graphics,
-                    graphics_pipeline.layout().clone(),
-                    0,
-                    graphics_descriptor_set.clone()
-                )
-                .begin_render_pass(
-                    RenderPassBeginInfo {
-                        clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
-                        ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                    },
-                    SubpassContents::Inline,
-                )
-                .unwrap()
-                .draw(3, 1, 0, 0)
-                .unwrap()
-                .end_render_pass()
+                .clear_color_image(ClearColorImageInfo {
+                    clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]),
+                    ..ClearColorImageInfo::image(image.clone())
+                })
                 .unwrap();
+
+                // Dispatch the compute shader
+                // .bind_pipeline_compute(compute_pipeline.clone())
+                // .bind_descriptor_sets(
+                //     PipelineBindPoint::Compute,
+                //     compute_pipeline.layout().clone(),
+                //     0,
+                //     compute_descriptor_set.clone()
+                // )
+                // .dispatch([1024 / 8, 1024 / 8, 1])
+                // .unwrap()
+                //
+                // // Render the compute result
+                // .bind_pipeline_graphics(graphics_pipeline.clone())
+                // .bind_descriptor_sets(
+                //     PipelineBindPoint::Graphics,
+                //     graphics_pipeline.layout().clone(),
+                //     0,
+                //     graphics_descriptor_set.clone()
+                // )
+                // .begin_render_pass(
+                //     RenderPassBeginInfo {
+                //         clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
+                //         ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                //     },
+                //     SubpassContents::Inline,
+                // )
+                // .unwrap()
+                // .draw(3, 1, 0, 0)
+                // .unwrap()
+                // .end_render_pass()
+                // .unwrap();
 
             Arc::new(builder.build().unwrap())
         })

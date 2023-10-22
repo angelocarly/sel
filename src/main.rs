@@ -1,12 +1,14 @@
 pub mod vulkan;
 mod graphics;
 
+use std::sync::Arc;
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
 use vulkano::sync::{self, FlushError, GpuFuture};
 use vulkano::swapchain;
 
 use tracing_subscriber;
+use tracing_subscriber::filter::FilterExt;
 
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
@@ -16,6 +18,7 @@ use winit::event_loop::ControlFlow;
 
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::swapchain::{AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
+use vulkano::sync::future::FenceSignalFuture;
 
 use vulkano_win::VkSurfaceBuild;
 use crate::graphics::{fs, vs};
@@ -106,11 +109,16 @@ fn main() {
         &graphics_pipeline,
         graphics_descriptor_set.clone(),
         &framebuffers,
+        &image
     );
 
     // Event loop
     let mut window_resized = false;
     let mut recreate_swapchain = false;
+
+    let frames_in_flight = images.len();
+    let mut fences: Vec<Option<Arc<FenceSignalFuture<_>>>> = vec![None; frames_in_flight];
+    let mut previous_fence_i = 0;
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -143,7 +151,7 @@ fn main() {
                         window_resized = false;
 
                         viewport.dimensions = new_dimensions.into();
-                        let (new_compute_pipeline , new_compute_descriptor_set) = graphics::get_pipeline(
+                        let (new_compute_pipeline, new_compute_descriptor_set) = graphics::get_pipeline(
                             device.clone(),
                             image_view.clone(),
                         );
@@ -163,45 +171,62 @@ fn main() {
                             &new_graphics_pipeline,
                             new_graphics_descriptor_set.clone(),
                             &new_framebuffers,
+                            &image
                         );
                     }
-
-                    let (image_i, suboptimal, acquire_future) =
-                        match swapchain::acquire_next_image(swapchain.clone(), None) {
-                            Ok(r) => r,
-                            Err(AcquireError::OutOfDate) => {
-                                recreate_swapchain = true;
-                                return;
-                            }
-                            Err(e) => panic!("failed to acquire next image: {}", e),
-                        };
-
-                    if suboptimal {
-                        recreate_swapchain = true;
-                    }
-
-                    let execution = sync::now(device.clone())
-                        .join(acquire_future)
-                        .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
-                        .unwrap()
-                        .then_swapchain_present(
-                            queue.clone(),
-                            SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_i),
-                        )
-                        .then_signal_fence_and_flush();
-
-                    match execution {
-                        Ok(future) => {
-                            future.wait(None).unwrap();  // wait for the GPU to finish
-                        }
-                        Err(FlushError::OutOfDate) => {
-                            recreate_swapchain = true;
-                        }
-                        Err(e) => {
-                            println!("Failed to flush future: {e}");
-                        }
-                    }
                 }
+
+                let (image_i, suboptimal, acquire_future) =
+                    match swapchain::acquire_next_image(swapchain.clone(), None) {
+                        Ok(r) => r,
+                        Err(AcquireError::OutOfDate) => {
+                            recreate_swapchain = true;
+                            return;
+                        }
+                        Err(e) => panic!("failed to acquire next image: {}", e),
+                    };
+
+                if suboptimal {
+                    recreate_swapchain = true;
+                }
+
+                // Wait for the fence related to this image to finish (normally this would be the oldest fence)
+                if let Some(image_fence) = &fences[image_i as usize] {
+                    image_fence.wait(None).unwrap();
+                }
+
+                let previous_future = match fences[previous_fence_i as usize].clone() {
+                    None => {
+                        let mut now = sync::now(device.clone());
+                        now.cleanup_finished();
+
+                        now.boxed()
+                    }
+                    Some(fence) => fence.boxed()
+                };
+
+                let future = previous_future
+                    .join(acquire_future)
+                    .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
+                    .unwrap()
+                    .then_swapchain_present(
+                        queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_i),
+                    )
+                    .then_signal_fence_and_flush();
+
+                fences[image_i as usize] = match future {
+                    Ok(value) => Some(Arc::new(value)),
+                    Err(FlushError::OutOfDate) => {
+                        recreate_swapchain = true;
+                        None
+                    }
+                    Err(e) => {
+                        panic!("Failed to flush future: {}", e);
+                    }
+                };
+
+                previous_fence_i = image_i;
             }
             _ => {}
         }

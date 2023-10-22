@@ -123,6 +123,7 @@ pub fn create_swapchain(physical_device: Arc<PhysicalDevice>, device: Arc<Device
     let caps = physical_device
         .surface_capabilities(&surface, Default::default())
         .expect("Failed to get surface capabilities.");
+
     let dimensions = window.inner_size();
     let composite_alpha = caps.supported_composite_alpha.into_iter().next().unwrap();
     let image_format = Some(
@@ -136,7 +137,7 @@ pub fn create_swapchain(physical_device: Arc<PhysicalDevice>, device: Arc<Device
         device.clone(),
         surface.clone(),
         SwapchainCreateInfo {
-            min_image_count: caps.min_image_count + 1,
+            min_image_count: caps.min_image_count,
             image_format,
             image_extent: dimensions.into(),
             image_usage: ImageUsage::COLOR_ATTACHMENT,
