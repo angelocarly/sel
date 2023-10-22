@@ -10,9 +10,9 @@ use vulkano::swapchain;
 
 use tracing_subscriber;
 use tracing_subscriber::filter::FilterExt;
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
 use vulkano::device::Queue;
-use vulkano::format::Format;
+use vulkano::format::{ClearColorValue, Format};
 use vulkano::image::{ImageCreateFlags, ImageDimensions, ImageUsage, StorageImage};
 use vulkano::image::sys::Image;
 use vulkano::image::view::ImageView;
@@ -62,6 +62,7 @@ fn build_command_buffers(
     draw_pipeline: &Arc<DrawPipeline>,
     compute_pipeline: &Arc<ComputeRaysPipeline>,
     viewport: &Viewport,
+    image: &Arc<StorageImage>,
     image_view: &Arc<ImageView<StorageImage>>
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
@@ -72,6 +73,11 @@ fn build_command_buffers(
                 queue.queue_family_index(),
                 CommandBufferUsage::MultipleSubmit, // don't forget to write the correct buffer usage
             ).unwrap();
+
+            builder.clear_color_image(ClearColorImageInfo {
+                clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]),
+                ..ClearColorImageInfo::image(image.clone())
+            }).unwrap();
 
             // Execute the compute pipeline
             // TODO: Perform compute shader without access error
@@ -184,7 +190,8 @@ fn main() {
         &draw_pipeline,
         &compute_pipeline,
         &viewport,
-        &image_view
+        &image,
+        &image_view,
     );
 
     // Event loop
@@ -233,6 +240,7 @@ fn main() {
                             &draw_pipeline,
                             &compute_pipeline,
                             &viewport,
+                            &image,
                             &image_view
                         );
                     }
