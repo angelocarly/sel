@@ -1,5 +1,6 @@
 pub mod vulkan;
-mod graphics;
+mod draw_pipeline;
+mod compute_rays_pipeline;
 
 use std::sync::Arc;
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
@@ -9,6 +10,12 @@ use vulkano::swapchain;
 
 use tracing_subscriber;
 use tracing_subscriber::filter::FilterExt;
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::device::Queue;
+use vulkano::format::Format;
+use vulkano::image::{ImageCreateFlags, ImageDimensions, ImageUsage, StorageImage};
+use vulkano::image::sys::Image;
+use vulkano::image::view::ImageView;
 
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
@@ -17,12 +24,82 @@ use winit::window::Window;
 use winit::event_loop::ControlFlow;
 
 use vulkano::pipeline::graphics::viewport::Viewport;
+use vulkano::render_pass::{Framebuffer, Subpass};
 use vulkano::swapchain::{AcquireError, SwapchainCreateInfo, SwapchainCreationError, SwapchainPresentInfo};
 use vulkano::sync::future::FenceSignalFuture;
 
 use vulkano_win::VkSurfaceBuild;
-use crate::graphics::{fs, vs};
+use crate::compute_rays_pipeline::ComputeRaysPipeline;
+use crate::draw_pipeline::DrawPipeline;
 use crate::vulkan::get_framebuffers;
+
+pub fn get_image(memory_allocator: &StandardMemoryAllocator, queue: Arc<Queue>) -> (Arc<StorageImage>, Arc<ImageView<StorageImage>>) {
+    let mut image = StorageImage::with_usage(
+        memory_allocator,
+        ImageDimensions::Dim2d {
+            width: 1024,
+            height: 1024,
+            array_layers: 1,
+        },
+        Format::R8G8B8A8_UNORM,
+        ImageUsage::TRANSFER_SRC
+            | ImageUsage::TRANSFER_DST
+            | ImageUsage::SAMPLED
+            | ImageUsage::STORAGE,
+        ImageCreateFlags::empty(),
+        Some(queue.queue_family_index()),
+    ).unwrap();
+
+    let view = ImageView::new_default(image.clone()).unwrap();
+
+    return (image, view);
+}
+
+fn build_command_buffers(
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    queue: &Arc<Queue>,
+    framebuffers: &Vec<Arc<Framebuffer>>,
+    draw_pipeline: &Arc<DrawPipeline>,
+    compute_pipeline: &Arc<ComputeRaysPipeline>,
+    viewport: &Viewport,
+    image_view: &Arc<ImageView<StorageImage>>
+) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
+    framebuffers
+        .iter()
+        .map(|framebuffer| {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                command_buffer_allocator,
+                queue.queue_family_index(),
+                CommandBufferUsage::MultipleSubmit, // don't forget to write the correct buffer usage
+            ).unwrap();
+
+            // Execute the compute pipeline
+            // TODO: Perform compute shader without access error
+            // builder.execute_commands(
+            //     compute_pipeline.draw(image_view.clone())
+            // ).unwrap();
+
+            // Start a renderpass for the framebuffer
+            builder.begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
+                    ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                },
+                SubpassContents::SecondaryCommandBuffers,
+            ).unwrap();
+
+            // Bind the pipeline
+            builder.execute_commands(
+                draw_pipeline.draw(viewport)
+            ).unwrap();
+
+            // End renderpass
+            builder.end_render_pass().unwrap();
+
+            Arc::new(builder.build().unwrap())
+        })
+        .collect()
+}
 
 fn main() {
 
@@ -71,45 +148,43 @@ fn main() {
     };
 
     // Image
-    let (image, image_view) = graphics::get_image(
+    let (image, image_view) = get_image(
         &memory_allocator,
         queue.clone(),
     );
 
-    // Compute pipeline
-    let (compute_pipeline, compute_descriptor_set) = graphics::get_pipeline(
-        device.clone(),
-        image_view.clone()
-    );
-
-    // Graphics pipeline
-    let vs = vs::load(device.clone()).expect("failed to create shader module.");
-    let fs = fs::load(device.clone()).expect("failed to create shader module.");
-
-    let (graphics_pipeline, graphics_descriptor_set) = graphics::get_graphics_pipeline(
-        device.clone(),
-        vs.clone(),
-        fs.clone(),
-        render_pass.clone(),
-        viewport.clone(),
-        image_view.clone()
-    );
-
     // Command buffers
-    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+    let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
         device.clone(),
         StandardCommandBufferAllocatorCreateInfo::default(),
+    ));
+
+    // Compute pipeline
+    let compute_pipeline = Arc::new(
+        ComputeRaysPipeline::new(
+            queue.clone(),
+            render_pass.clone(),
+            command_buffer_allocator.clone()
+        )
     );
 
-    let mut command_buffers = graphics::build_command_buffers(
+    // Draw pipeline
+    let draw_pipeline = Arc::new(
+        draw_pipeline::DrawPipeline::new(
+            queue.clone(),
+            render_pass.clone(),
+            command_buffer_allocator.clone(),
+        )
+    );
+
+    let mut command_buffers = build_command_buffers(
         &command_buffer_allocator,
         &queue,
-        &compute_pipeline,
-        compute_descriptor_set.clone(),
-        &graphics_pipeline,
-        graphics_descriptor_set.clone(),
         &framebuffers,
-        &image
+        &draw_pipeline,
+        &compute_pipeline,
+        &viewport,
+        &image_view
     );
 
     // Event loop
@@ -151,27 +226,14 @@ fn main() {
                         window_resized = false;
 
                         viewport.dimensions = new_dimensions.into();
-                        let (new_compute_pipeline, new_compute_descriptor_set) = graphics::get_pipeline(
-                            device.clone(),
-                            image_view.clone(),
-                        );
-                        let (new_graphics_pipeline, new_graphics_descriptor_set) = graphics::get_graphics_pipeline(
-                            device.clone(),
-                            vs.clone(),
-                            fs.clone(),
-                            render_pass.clone(),
-                            viewport.clone(),
-                            image_view.clone(),
-                        );
-                        command_buffers = graphics::build_command_buffers(
+                        command_buffers = build_command_buffers(
                             &command_buffer_allocator,
                             &queue,
-                            &new_compute_pipeline,
-                            new_compute_descriptor_set.clone(),
-                            &new_graphics_pipeline,
-                            new_graphics_descriptor_set.clone(),
                             &new_framebuffers,
-                            &image
+                            &draw_pipeline,
+                            &compute_pipeline,
+                            &viewport,
+                            &image_view
                         );
                     }
                 }
