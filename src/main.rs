@@ -1,21 +1,22 @@
 pub mod vulkan;
-mod draw_pipeline;
-mod compute_rays_pipeline;
 
 use std::sync::Arc;
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
 use vulkano::sync::{self, FlushError, GpuFuture};
-use vulkano::swapchain;
+use vulkano::{descriptor_set, swapchain};
 
 use tracing_subscriber;
 use tracing_subscriber::filter::FilterExt;
-use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassContents};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyImageToBufferInfo, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SecondaryAutoCommandBuffer, SubpassContents};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::Queue;
 use vulkano::format::{ClearColorValue, Format};
-use vulkano::image::{ImageCreateFlags, ImageDimensions, ImageUsage, StorageImage};
+use vulkano::image::{ImageAccess, ImageCreateFlags, ImageDimensions, ImageUsage, StorageImage};
 use vulkano::image::sys::Image;
 use vulkano::image::view::ImageView;
+use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineBindPoint};
 
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
@@ -29,12 +30,44 @@ use vulkano::swapchain::{AcquireError, SwapchainCreateInfo, SwapchainCreationErr
 use vulkano::sync::future::FenceSignalFuture;
 
 use vulkano_win::VkSurfaceBuild;
-use crate::compute_rays_pipeline::ComputeRaysPipeline;
-use crate::draw_pipeline::DrawPipeline;
 use crate::vulkan::get_framebuffers;
 
+mod cs {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: "
+            #version 460
+
+            layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+            layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+
+            void main() {
+                vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
+                vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
+
+                vec2 z = vec2(0.0, 0.0);
+                float i;
+                for (i = 0.0; i < 1.0; i += 0.005) {
+                    z = vec2(
+                        z.x * z.x - z.y * z.y + c.x,
+                        z.y * z.x + z.x * z.y + c.y
+                    );
+
+                    if (length(z) > 4.0) {
+                        break;
+                    }
+                }
+
+                vec4 to_write = vec4(vec3(i), 1.0);
+                imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
+            }
+        "
+    }
+}
+
 pub fn get_image(memory_allocator: &StandardMemoryAllocator, queue: Arc<Queue>) -> (Arc<StorageImage>, Arc<ImageView<StorageImage>>) {
-    let mut image = StorageImage::with_usage(
+    let mut image = StorageImage::new(
         memory_allocator,
         ImageDimensions::Dim2d {
             width: 1024,
@@ -42,69 +75,12 @@ pub fn get_image(memory_allocator: &StandardMemoryAllocator, queue: Arc<Queue>) 
             array_layers: 1,
         },
         Format::R8G8B8A8_UNORM,
-        ImageUsage::TRANSFER_SRC
-            | ImageUsage::TRANSFER_DST
-            | ImageUsage::SAMPLED
-            | ImageUsage::STORAGE,
-        ImageCreateFlags::empty(),
         Some(queue.queue_family_index()),
     ).unwrap();
 
     let view = ImageView::new_default(image.clone()).unwrap();
 
     return (image, view);
-}
-
-fn build_command_buffers(
-    command_buffer_allocator: &StandardCommandBufferAllocator,
-    queue: &Arc<Queue>,
-    framebuffers: &Vec<Arc<Framebuffer>>,
-    draw_pipeline: &Arc<DrawPipeline>,
-    compute_pipeline: &Arc<ComputeRaysPipeline>,
-    viewport: &Viewport,
-    image: &Arc<StorageImage>,
-    image_view: &Arc<ImageView<StorageImage>>
-) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
-    framebuffers
-        .iter()
-        .map(|framebuffer| {
-            let mut builder = AutoCommandBufferBuilder::primary(
-                command_buffer_allocator,
-                queue.queue_family_index(),
-                CommandBufferUsage::MultipleSubmit, // don't forget to write the correct buffer usage
-            ).unwrap();
-
-            builder.clear_color_image(ClearColorImageInfo {
-                clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]),
-                ..ClearColorImageInfo::image(image.clone())
-            }).unwrap();
-
-            // Execute the compute pipeline
-            // TODO: Perform compute shader without access error
-            // builder.execute_commands(
-            //     compute_pipeline.draw(image_view.clone())
-            // ).unwrap();
-
-            // Start a renderpass for the framebuffer
-            builder.begin_render_pass(
-                RenderPassBeginInfo {
-                    clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
-                    ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
-                },
-                SubpassContents::SecondaryCommandBuffers,
-            ).unwrap();
-
-            // Bind the pipeline
-            builder.execute_commands(
-                draw_pipeline.draw(viewport)
-            ).unwrap();
-
-            // End renderpass
-            builder.end_render_pass().unwrap();
-
-            Arc::new(builder.build().unwrap())
-        })
-        .collect()
 }
 
 fn main() {
@@ -135,29 +111,33 @@ fn main() {
     let queue = queues.next().unwrap();
     let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
 
-    // Swapchain
-    let (mut swapchain, images) = vulkan::create_swapchain(
-        physical_device.clone(),
-        device.clone(),
-        window.clone(),
-        surface.clone(),
-    );
-
-    // Render pass
-    let render_pass = vulkan::get_render_pass(device.clone(), &swapchain);
-    let framebuffers = get_framebuffers(&images, &render_pass);
-
-    let mut viewport = Viewport {
-        origin: [0.0, 0.0],
-        dimensions: window.inner_size().into(),
-        depth_range: 0.0..1.0,
-    };
-
     // Image
     let (image, image_view) = get_image(
         &memory_allocator,
         queue.clone(),
     );
+
+    // Compute pipeline
+    let cs = cs::load(device.clone())
+        .expect("Failed to create shader module.");
+
+    let pipeline = ComputePipeline::new(
+        device.clone(),
+        cs.entry_point("main").unwrap(),
+        &(),
+        None,
+        |_| {},
+    ).expect("Failed to create compute pipeline.");
+
+    // Descriptor set
+    let descriptor_set_allocator = StandardDescriptorSetAllocator::new(device.clone());
+    let pipeline_layout = pipeline.layout().set_layouts().get(0).unwrap();
+
+    let descriptor_set = PersistentDescriptorSet::new(
+        &descriptor_set_allocator,
+        pipeline_layout.clone(),
+        [WriteDescriptorSet::image_view(0, image_view.clone())],
+    ).unwrap();
 
     // Command buffers
     let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -165,141 +145,34 @@ fn main() {
         StandardCommandBufferAllocatorCreateInfo::default(),
     ));
 
-    // Compute pipeline
-    let compute_pipeline = Arc::new(
-        ComputeRaysPipeline::new(
-            queue.clone(),
-            render_pass.clone(),
-            command_buffer_allocator.clone()
-        )
-    );
-
-    // Draw pipeline
-    let draw_pipeline = Arc::new(
-        draw_pipeline::DrawPipeline::new(
-            queue.clone(),
-            render_pass.clone(),
-            command_buffer_allocator.clone(),
-        )
-    );
-
-    let mut command_buffers = build_command_buffers(
+    let mut builder = AutoCommandBufferBuilder::primary(
         &command_buffer_allocator,
-        &queue,
-        &framebuffers,
-        &draw_pipeline,
-        &compute_pipeline,
-        &viewport,
-        &image,
-        &image_view,
-    );
+        queue_family_index,
+        CommandBufferUsage::OneTimeSubmit,
+    ).unwrap();
 
-    // Event loop
-    let mut window_resized = false;
-    let mut recreate_swapchain = false;
+    builder
+        .clear_color_image(ClearColorImageInfo::image(image))
+        .unwrap()
+        .bind_pipeline_compute(pipeline.clone())
+        .bind_descriptor_sets(
+            PipelineBindPoint::Compute,
+            pipeline.layout().clone(),
+            0,
+            descriptor_set,
+        )
+        .dispatch([1024 / 8, 1024 / 8, 1])
+        .unwrap();
 
-    let frames_in_flight = images.len();
-    let mut fences: Vec<Option<Arc<FenceSignalFuture<_>>>> = vec![None; frames_in_flight];
-    let mut previous_fence_i = 0;
+    let command_buffer = builder.build().unwrap();
 
-    event_loop.run(move |event, _, control_flow| {
-        match event {
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::WindowEvent { event: WindowEvent::Resized(_), .. } => {
-                window_resized = true;
-            }
-            Event::MainEventsCleared => {
-                if window_resized || recreate_swapchain {
-                    recreate_swapchain = false;
+    let future = sync::now(device.clone())
+        .then_execute(queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
 
-                    let new_dimensions = window.inner_size();
+    future.wait(None).unwrap();
 
-                    let (new_swapchain, new_images) = match swapchain.recreate(SwapchainCreateInfo {
-                        image_extent: new_dimensions.into(), // here, "image_extend" will correspond to the window dimensions
-                        ..swapchain.create_info()
-                    }) {
-                        Ok(r) => r,
-                        // This error tends to happen when the user is manually resizing the window.
-                        // Simply restarting the loop is the easiest way to fix this issue.
-                        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                        Err(e) => panic!("failed to recreate swapchain: {}", e),
-                    };
-                    swapchain = new_swapchain;
-                    let new_framebuffers = get_framebuffers(&new_images, &render_pass);
-
-                    if window_resized {
-                        window_resized = false;
-
-                        viewport.dimensions = new_dimensions.into();
-                        command_buffers = build_command_buffers(
-                            &command_buffer_allocator,
-                            &queue,
-                            &new_framebuffers,
-                            &draw_pipeline,
-                            &compute_pipeline,
-                            &viewport,
-                            &image,
-                            &image_view
-                        );
-                    }
-                }
-
-                let (image_i, suboptimal, acquire_future) =
-                    match swapchain::acquire_next_image(swapchain.clone(), None) {
-                        Ok(r) => r,
-                        Err(AcquireError::OutOfDate) => {
-                            recreate_swapchain = true;
-                            return;
-                        }
-                        Err(e) => panic!("failed to acquire next image: {}", e),
-                    };
-
-                if suboptimal {
-                    recreate_swapchain = true;
-                }
-
-                // Wait for the fence related to this image to finish (normally this would be the oldest fence)
-                if let Some(image_fence) = &fences[image_i as usize] {
-                    image_fence.wait(None).unwrap();
-                }
-
-                let previous_future = match fences[previous_fence_i as usize].clone() {
-                    None => {
-                        let mut now = sync::now(device.clone());
-                        now.cleanup_finished();
-
-                        now.boxed()
-                    }
-                    Some(fence) => fence.boxed()
-                };
-
-                let future = previous_future
-                    .join(acquire_future)
-                    .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
-                    .unwrap()
-                    .then_swapchain_present(
-                        queue.clone(),
-                        SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_i),
-                    )
-                    .then_signal_fence_and_flush();
-
-                fences[image_i as usize] = match future {
-                    Ok(value) => Some(Arc::new(value)),
-                    Err(FlushError::OutOfDate) => {
-                        recreate_swapchain = true;
-                        None
-                    }
-                    Err(e) => {
-                        panic!("Failed to flush future: {}", e);
-                    }
-                };
-
-                previous_fence_i = image_i;
-            }
-            _ => {}
-        }
-    });
 }
 
