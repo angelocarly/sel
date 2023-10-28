@@ -71,6 +71,7 @@ pub(crate) fn create_instance() -> Arc<Instance> {
 pub fn device_extensions() -> DeviceExtensions {
     return DeviceExtensions {
         khr_swapchain: true,
+        ext_shader_atomic_float: true,
         ..DeviceExtensions::empty()
     };
 }

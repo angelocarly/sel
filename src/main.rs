@@ -1,6 +1,7 @@
 pub mod vulkan;
 
 use std::sync::Arc;
+use image::{ImageBuffer, Rgba};
 use vulkano::memory::allocator::{StandardMemoryAllocator, MemoryUsage, AllocationCreateInfo};
 use vulkano::command_buffer::allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo};
 use vulkano::sync::{self, FlushError, GpuFuture};
@@ -8,6 +9,7 @@ use vulkano::{descriptor_set, swapchain};
 
 use tracing_subscriber;
 use tracing_subscriber::filter::FilterExt;
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyImageToBufferInfo, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SecondaryAutoCommandBuffer, SubpassContents};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
@@ -37,30 +39,16 @@ mod cs {
         ty: "compute",
         src: "
             #version 460
+            #extension GL_EXT_shader_atomic_float : require
 
             layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-            layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+            layout(set = 0, binding = 0, rgba8) uniform image2D accum_image;
 
             void main() {
-                vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
-                vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
+                // vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
 
-                vec2 z = vec2(0.0, 0.0);
-                float i;
-                for (i = 0.0; i < 1.0; i += 0.005) {
-                    z = vec2(
-                        z.x * z.x - z.y * z.y + c.x,
-                        z.y * z.x + z.x * z.y + c.y
-                    );
-
-                    if (length(z) > 4.0) {
-                        break;
-                    }
-                }
-
-                vec4 to_write = vec4(vec3(i), 1.0);
-                imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
+                imageAtomicAdd(accum_image, ivec2(0), 1);
             }
         "
     }
@@ -139,6 +127,21 @@ fn main() {
         [WriteDescriptorSet::image_view(0, image_view.clone())],
     ).unwrap();
 
+    // Buffer
+    let buf = Buffer::from_iter(
+        &memory_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Download,
+            ..Default::default()
+        },
+        (0..1024 * 1024 * 4).map(|_| 0u8),
+    )
+        .expect("Failed to create buffer.");
+
     // Command buffers
     let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
         device.clone(),
@@ -152,7 +155,7 @@ fn main() {
     ).unwrap();
 
     builder
-        .clear_color_image(ClearColorImageInfo::image(image))
+        .clear_color_image(ClearColorImageInfo::image(image.clone()))
         .unwrap()
         .bind_pipeline_compute(pipeline.clone())
         .bind_descriptor_sets(
@@ -162,7 +165,13 @@ fn main() {
             descriptor_set,
         )
         .dispatch([1024 / 8, 1024 / 8, 1])
+        .unwrap()
+        .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+            image.clone(),
+            buf.clone(),
+        ))
         .unwrap();
+
 
     let command_buffer = builder.build().unwrap();
 
@@ -174,5 +183,8 @@ fn main() {
 
     future.wait(None).unwrap();
 
+    let buffer_content = buf.read().unwrap();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+    image.save("image.png").unwrap();
 }
 
